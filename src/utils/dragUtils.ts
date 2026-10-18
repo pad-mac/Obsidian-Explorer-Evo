@@ -1,0 +1,68 @@
+/**
+ * 拖曳相關的工具函數
+ * 用於處理 Obsidian URI 格式的拖曳操作
+ */
+
+// 從 obsidian://open?vault=...&file=... 解析出 vault 名稱與檔案路徑
+interface ObsidianWindow extends Window {
+    app?: {
+        vault?: {
+            getName?: () => string;
+        };
+    };
+}
+
+export function parseObsidianOpenUris(input: string): Array<{ vault?: string; file?: string }> {
+    const results: Array<{ vault?: string; file?: string }> = [];
+    if (!input) return results;
+
+    // 可能是多行或連續字串，先嘗試按換行切分
+    const chunks = input.split(/\r?\n/).filter(Boolean);
+    const toScan = chunks.length ? chunks : [input];
+
+    for (const part of toScan) {
+        // 支援無分隔連續的多筆 obsidian://open
+        const re = /obsidian:\/\/open\?([\s\S]*?)(?=obsidian:\/\/open\?|$)/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(part)) !== null) {
+            const q = m[1];
+            try {
+                const usp = new URLSearchParams(q);
+                const vault = usp.get('vault') || undefined;
+                const file = usp.get('file') ? decodeURIComponent(usp.get('file') as string) : undefined;
+                results.push({ vault, file });
+            } catch (error) {
+                console.error('GridExplorer: Error parsing obsidian://open URI', error);
+            }
+        }
+    }
+    return results;
+}
+
+// 從 DataTransfer 嘗試萃取 obsidian://open URI 的 file 路徑（支援多筆）
+export async function extractObsidianPathsFromDT(dt: DataTransfer | null): Promise<string[]> {
+    if (!dt) return [];
+    
+    const texts: string[] = [];
+    // 僅從 text/uri-list 解析 obsidian://open URIs
+    try {
+        const uriList = dt.getData('text/uri-list');
+        if (uriList) texts.push(uriList);
+    } catch (error) {
+        console.error('GridExplorer: Error getting data from DataTransfer', error);
+    }
+
+    const vaultName = (window as ObsidianWindow).app?.vault?.getName?.();
+    const paths: string[] = [];
+    for (const t of texts) {
+        const entries = parseObsidianOpenUris(t);
+        for (const e of entries) {
+            if (!e.file) continue;
+            // 僅接受相同 vault（若有提供 vault 參數）
+            if (e.vault && vaultName && e.vault !== vaultName) continue;
+            paths.push(e.file);
+        }
+    }
+    // 去重
+    return Array.from(new Set(paths));
+}

@@ -1,0 +1,952 @@
+import { EventRef, Menu, MenuItem, Plugin, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
+import { GridView } from './GridView';
+import { ExplorerView, EXPLORER_VIEW_TYPE } from './ExplorerView';
+import { ZipView, VIEW_TYPE_ZIP } from './ZipView';
+import { updateCustomDocumentExtensions, isMediaFile } from './utils/fileUtils';
+import { showFolderSelectionModal } from './modal/folderSelectionModal';
+import { showNoteSettingsModal } from './modal/noteSettingsModal';
+import { GallerySettings, DEFAULT_SETTINGS, GridExplorerSettingTab } from './settings';
+import { t } from './translations';
+
+interface MenuItemWithSubmenu extends MenuItem {
+    setSubmenu(): Menu;
+}
+
+interface CustomWorkspace {
+    on(name: 'grid-explorer:preview-file', callback: (fileOrPath: string | TFile) => void): EventRef;
+}
+
+declare global {
+    interface Window {
+        GridExplorer?: GridExplorerPlugin;
+    }
+}
+
+type WorkspaceEventHandler = (name: string, callback: (...data: unknown[]) => unknown) => EventRef;
+
+interface CanvasPosition {
+    x: number;
+    y: number;
+}
+
+interface CanvasDropNode {
+    file: TFile;
+    pos: CanvasPosition;
+    size: { width: number; height: number };
+    focus: boolean;
+}
+
+interface CanvasDropApi {
+    posFromEvt(evt: DragEvent): CanvasPosition;
+    createFileNode(node: CanvasDropNode): unknown;
+    addNode(node: unknown): void;
+    requestSave(): Promise<void>;
+}
+
+interface CanvasDropView {
+    containerEl?: HTMLElement;
+    canvas?: CanvasDropApi;
+    gridExplorerDropHandler?: boolean;
+}
+
+export default class GridExplorerPlugin extends Plugin {
+    settings: GallerySettings = DEFAULT_SETTINGS;
+    statusBarItem: HTMLElement | null = null;
+    // Session-only scroll memory for Full view. This deliberately is not written to
+    // plugin data: it exists only so opening a note and pressing Back feels native.
+    fullViewScrollPositions: Map<string, number> = new Map();
+
+    async getThumbnail(zipPath: string): Promise<string | null> {
+        const file = this.app.vault.getAbstractFileByPath(zipPath);
+        if (file instanceof TFile && file.extension.toLowerCase() === 'zip') {
+            const { getFirstImageFromZip } = await import('./utils/mediaUtils');
+            return await getFirstImageFromZip(this.app, file);
+        }
+        return null;
+    }
+
+    async onload() {
+        await this.loadSettings();
+
+        // 註冊視圖類型
+        this.registerView(
+            'grid-view',
+            (leaf) => new GridView(leaf, this)
+        );
+
+        // 註冊資料夾樹狀視圖
+        this.registerView(
+            EXPLORER_VIEW_TYPE,
+            (leaf) => new ExplorerView(leaf, this)
+        );
+
+        // 註冊 ZIP 檢視視圖
+        this.registerView(
+            VIEW_TYPE_ZIP,
+            (leaf) => new ZipView(leaf)
+        );
+        try {
+            this.registerExtensions(["zip"], VIEW_TYPE_ZIP);
+        } catch (e) {
+            console.warn("Grid Explorer: Could not register 'zip' extension.", e);
+        }
+
+        // 註冊設定頁面
+        this.addSettingTab(new GridExplorerSettingTab(this.app, this));
+
+        // 註冊開啟視圖指令
+        this.addCommand({
+            id: 'open-grid-view',
+            name: t('open_grid_view'),
+            callback: () => {
+                showFolderSelectionModal(this.app, this);
+            }
+        });
+
+        // 開啟瀏覽器視圖指令
+        this.addCommand({
+            id: 'open-explorer-view',
+            name: t('open_explorer') || 'Open Explorer',
+            callback: async () => {
+                // 若已存在 ExplorerView，直接聚焦現有的 leaf
+                const existingLeaves = this.app.workspace.getLeavesOfType(EXPLORER_VIEW_TYPE);
+                if (existingLeaves.length > 0) {
+                    void this.app.workspace.revealLeaf(existingLeaves[0]);
+                    return;
+                }
+
+                // 否則在左側側欄建立新的 leaf（不足時回退到新分頁）
+                let leaf = this.app.workspace.getLeftLeaf(false);
+                if (!leaf) leaf = this.app.workspace.getLeftLeaf(true);
+                if (!leaf) leaf = this.app.workspace.getLeaf('tab');
+                await leaf.setViewState({ type: EXPLORER_VIEW_TYPE, active: true });
+                void this.app.workspace.revealLeaf(leaf);
+            }
+        });
+
+        // Toggle the current folder between card Grid view and lazy reading-mode Full view.
+        this.addCommand({
+            id: 'toggle-full-view',
+            name: t('toggle_full_view'),
+            checkCallback: (checking: boolean) => {
+                const gridView = this.app.workspace.getActiveViewOfType(GridView);
+                if (!gridView || !gridView.canUseFullView()) return false;
+                if (!checking) void gridView.toggleFullView();
+                return true;
+            }
+        });
+
+        // 註冊開啟當前筆記指令
+        this.addCommand({
+            id: 'view-current-note-in-grid-view',
+            name: t('open_note_in_grid_view'),
+            callback: async () => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    await this.openNoteInFolder(activeFile);
+                } else {
+                    // 如果沒有當前筆記，則打開根目錄
+                    await this.openNoteInFolder(this.app.vault.getRoot());
+                }
+            }
+        });
+
+        // 註冊開啟反向連結指令
+        this.addCommand({
+            id: 'view-backlinks-in-grid-view',
+            name: t('open_backlinks_in_grid_view'),
+            callback: async () => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    await this.navigateToGrid('backlinks', activeFile.path);
+                } else {
+                    // 如果沒有當前筆記，則打開根目錄
+                    await this.openNoteInFolder(this.app.vault.getRoot());
+                }
+            }
+        });
+
+        // 註冊開啟外部連結指令
+        this.addCommand({
+            id: 'view-outgoinglinks-in-grid-view',
+            name: t('open_outgoinglinks_in_grid_view'),
+            callback: async () => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    await this.navigateToGrid('outgoinglinks', activeFile.path);
+                } else {
+                    // 如果沒有當前筆記，則打開根目錄
+                    await this.openNoteInFolder(this.app.vault.getRoot());
+                }
+            }
+        });
+
+        // 註冊開啟最近筆記指令
+        this.addCommand({
+            id: 'view-recent-files-in-grid-view',
+            name: t('open_recent_files_in_grid_view'),
+            callback: async () => {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    await this.openNoteInRecentFiles(activeFile);
+                } else {
+                    // 如果沒有當前筆記，則打開根目錄
+                    await this.openNoteInFolder(this.app.vault.getRoot());
+                }
+            }
+        });
+
+        // Open quick access folder command
+        this.addCommand({
+            id: 'open-quick-access-folder',
+            name: t('open_quick_access_folder'),
+            callback: async () => {
+                let targetPath = this.settings.quickAccessCommandPath;
+                if (!targetPath) {
+                    targetPath = this.app.vault.getRoot().path;
+                }
+
+                const targetFile = this.app.vault.getAbstractFileByPath(targetPath);
+
+                if (targetFile instanceof TFolder) {
+                    await this.openNoteInFolder(targetFile);
+                } else {
+                    await this.openNoteInFolder(this.app.vault.getRoot());
+                }
+            }
+        });
+
+        // Open quick access mode command
+        this.addCommand({
+            id: 'open-quick-access-mode',
+            name: t('open_quick_access_mode'),
+            callback: async () => {
+                await this.navigateToGrid(this.settings.quickAccessModeType);
+            }
+        });
+
+        // 新增 Ribbon 圖示
+        this.addRibbonIcon('grid', t('open_grid_view'), () => {
+            showFolderSelectionModal(this.app, this);
+        });
+
+        // 註冊狀態列項目
+        this.statusBarItem = this.addStatusBarItem();
+
+        // 註冊資料夾的右鍵選單
+        this.registerEvent(
+            this.app.workspace.on('file-menu', (menu: Menu, file) => {
+                if (file instanceof TFolder) {
+                    menu.addItem(item => {
+                        item
+                            .setTitle(t('open_in_grid_view'))
+                            .setIcon('grid')
+                            .setSection?.("open")
+                            .onClick(async () => {
+                                await this.openNoteInFolder(file);
+                            });
+                    });
+                }
+                if (file instanceof TFile) {
+                    // 開啟筆記
+                    menu.addItem(item => {
+                        item.setTitle(t('open_in_grid_view'));
+                        item.setIcon('grid');
+                        item.setSection?.("open");
+                        const ogSubmenu = (item as MenuItemWithSubmenu).setSubmenu();
+                        ogSubmenu.addItem((item) => {
+                            item
+                                .setTitle(t('open_note_in_grid_view'))
+                                .setIcon('folder')
+                                .onClick(async () => {
+                                    await this.openNoteInFolder(file);
+                                });
+                        });
+                        ogSubmenu.addItem((item) => {
+                            item
+                                .setTitle(t('open_backlinks_in_grid_view'))
+                                .setIcon('links-coming-in')
+                                .onClick(async () => {
+                                    await this.navigateToGrid('backlinks', file.path);
+                                });
+                        });
+                        ogSubmenu.addItem((item) => {
+                            item
+                                .setTitle(t('open_outgoinglinks_in_grid_view'))
+                                .setIcon('links-going-out')
+                                .onClick(async () => {
+                                    await this.navigateToGrid('outgoinglinks', file.path);
+                                });
+                        });
+                        if (this.settings.showRecentFilesMode && file instanceof TFile) {
+                            ogSubmenu.addItem((item) => {
+                                item
+                                    .setTitle(t('open_recent_files_in_grid_view'))
+                                    .setIcon('calendar-days')
+                                    .onClick(async () => {
+                                        await this.openNoteInRecentFiles(file);
+                                    });
+                            });
+                        }
+                    });
+                    // 搜尋選取的筆記名稱
+                    const link = isMediaFile(file) ? file.name : this.app.fileManager.generateMarkdownLink(file, "");
+                    const truncatedText = file.basename.length > 8 ? file.basename.substring(0, 8) + '...' : file.basename;
+                    const displayText = isMediaFile(file) ? ` ${truncatedText}` : ` [[${truncatedText}]]`;
+                    const menuItemTitle = t('search_selection_in_grid_view').replace('...', displayText); // 假設翻譯中有...代表要替換的部分，或者直接格式化
+                    menu.addItem(item => {
+                        item
+                            .setTitle(menuItemTitle)
+                            .setIcon('search')
+                            .setSection?.("view")
+                            .onClick(async () => {
+                                // 取得或啟用 GridView
+                                await this.navigateToGrid('', '', link);
+                            });
+                    });
+                    // 顯示筆記屬性
+                    menu.addItem((item) => {
+                        item
+                            .setTitle(t('set_note_attribute'))
+                            .setIcon('palette')
+                            .onClick(() => {
+                                showNoteSettingsModal(this.app, this, file);
+                            });
+                    });
+                }
+            })
+        );
+
+        // 註冊編輯器選單
+        this.registerEvent(
+            this.app.workspace.on('editor-menu', (menu: Menu, editor) => {
+                if (editor.somethingSelected()) {
+                    const selectedText = editor.getSelection();
+                    // 截斷過長的文字，最多顯示 15 個字元
+                    const truncatedText = selectedText.length > 15 ? selectedText.substring(0, 15) + '...' : selectedText;
+                    const menuItemTitle = t('search_selection_in_grid_view').replace('...', `「${truncatedText}」`); // 假設翻譯中有...代表要替換的部分，或者直接格式化
+
+                    menu.addItem(item => {
+                        item
+                            .setTitle(menuItemTitle)
+                            .setIcon('search')
+                            .setSection?.("view")
+                            .onClick(async () => {
+                                const selectedText = editor.getSelection();
+                                // 取得或啟用 GridView
+                                await this.navigateToGrid('', '', selectedText);
+                            });
+                    });
+                }
+            })
+        );
+
+        // 註冊tag-wrangler右鍵選單
+        const onWorkspaceEvent = this.app.workspace.on.bind(this.app.workspace) as WorkspaceEventHandler;
+        this.registerEvent(
+            onWorkspaceEvent('tag-wrangler:contextmenu', (...data: unknown[]) => {
+                const [menu, tagName] = data;
+                if (!(menu instanceof Menu) || typeof tagName !== 'string') {
+                    return;
+                }
+
+                // 截斷過長的文字，最多顯示 15 個字元
+                const truncatedText = tagName.length > 15 ? tagName.substring(0, 15) + '...' : tagName;
+                const menuItemTitle = t('search_selection_in_grid_view').replace('...', `「#${truncatedText}」`); // 假設翻譯中有...代表要替換的部分，或者直接格式化
+
+                menu.addItem(item => {
+                    item
+                        .setTitle(menuItemTitle)
+                        .setIcon('search')
+                        .setSection?.("view")
+                        .onClick(async () => {
+                            // 取得或啟用 GridView
+                            await this.navigateToGrid('', '', `#${tagName}`);
+                        });
+                });
+            })
+        );
+
+        // 攔截所有tag點擊事件
+        this.registerDomEvent(activeDocument, 'click', async (evt: MouseEvent) => {
+            // 判斷是否符合攔截條件
+            const tagMode = this.settings.interceptAllTagClicks;
+            if (tagMode === 'disabled') return;
+            if (tagMode === 'alt' && !evt.altKey) return;
+            if (tagMode === 'ctrl' && !(evt.ctrlKey || evt.metaKey)) return;
+            if (tagMode === 'shift' && !evt.shiftKey) return;
+
+            // 只處理左鍵
+            if (evt.button !== 0) return;
+
+            // 若點擊的是屬性面板中 tag pill 的刪除按鈕或標籤面板中的展開圖示，直接跳過
+            if ((evt.target as HTMLElement).closest('.multi-select-pill-remove-button, .tree-item-icon.collapse-icon')) return;
+
+            // 從觸發點往上找，看是否碰到 tag 連結
+            const el = (evt.target as HTMLElement).closest(
+                'a.tag,        /* 預覽模式中的 #tag */\n' +
+                '.tag-pane-tag, /* 標籤面板中的 tag */\n' +
+                'span.cm-hashtag, /* 編輯器中的 tag */\n' +
+                '.metadata-property[data-property-key="tags"] .multi-select-pill /* 屬性面板中的 tag */'
+            );
+            if (!el) return;            // 不是 tag 點擊就跳過
+
+            // 取出 tag 名稱（去掉前導 #）
+            let tagName = '';
+            if (el.matches('span.cm-hashtag')) {
+                // 編輯器模式：可能被拆成多個 span，需組合
+                const collect = [] as string[];
+                let curr: Element | null = el;
+                // 向左收集
+                while (curr && curr.matches('span.cm-hashtag') && !curr.classList.contains('cm-formatting')) {
+                    collect.unshift(curr.textContent ?? '');
+                    curr = curr.previousElementSibling;
+                    if (curr && (!curr.matches('span.cm-hashtag') || curr.classList.contains('cm-formatting'))) break;
+                }
+                // 向右收集
+                curr = el.nextElementSibling;
+                while (curr && curr.matches('span.cm-hashtag') && !curr.classList.contains('cm-formatting')) {
+                    collect.push(curr.textContent ?? '');
+                    curr = curr.nextElementSibling;
+                }
+                tagName = collect.join('').trim();
+            } else if (el.classList.contains('tag-pane-tag')) {
+                // Tag Pane 中的元素，需避開計數器
+                const inner = el.querySelector('.tag-pane-tag-text, .tree-item-inner-text');
+                tagName = inner?.textContent?.trim() ?? '';
+            } else if (el.matches('.metadata-property[data-property-key="tags"] .multi-select-pill')) {
+                // Frontmatter/Properties view
+                tagName = el.textContent?.trim() ?? '';
+            } else {
+                // 預覽模式中的連結 a.tag
+                tagName = (el.getAttribute('data-tag') ?? el.textContent ?? '').trim();
+            }
+            tagName = tagName.replace(/^#/, '');
+            if (!tagName) return;
+
+            // 阻止 Obsidian 自己的處理（開搜尋窗）
+            evt.preventDefault();
+            evt.stopPropagation();
+
+            // 叫出 GridView，並把搜尋字串設成這個 tag
+            await this.navigateToGrid('', '', `#${tagName}`);
+        }, true); // 用 capture，可在其他 listener 前先吃到
+
+        
+        // Intercept Obsidian's native note breadcrumb. Normal click opens the
+        // folder in the current Grid Explorer leaf; Ctrl/Cmd-click and middle-click
+        // open the same folder in a new Grid Explorer tab.
+        const handleBreadcrumbNavigation = async (evt: MouseEvent, forceNewTab = false) => {
+            const crumbMode = this.settings.interceptBreadcrumbClicks;
+            if (crumbMode === 'disabled') return;
+
+            const openInNewTab = forceNewTab || evt.ctrlKey || evt.metaKey;
+            if (crumbMode === 'alt' && !evt.altKey) return;
+            if (crumbMode === 'ctrl' && !(evt.ctrlKey || evt.metaKey || forceNewTab)) return;
+            if (crumbMode === 'shift' && !evt.shiftKey) return;
+
+            const target = evt.target as HTMLElement;
+            const breadcrumbEl = target.closest('.view-header-breadcrumb');
+            if (!breadcrumbEl || !breadcrumbEl.parentElement?.classList.contains('view-header-title-parent')) {
+                return;
+            }
+
+            evt.preventDefault();
+            evt.stopPropagation();
+
+            const parentEl = breadcrumbEl.parentElement;
+            const crumbs = Array.from(parentEl.querySelectorAll('.view-header-breadcrumb'));
+            const clickedIndex = crumbs.indexOf(breadcrumbEl);
+            if (clickedIndex < 0) return;
+
+            const activeFile = this.app.workspace.getActiveFile();
+            if (!activeFile) return;
+
+            const folders: TFolder[] = [];
+            let currFolder: TFolder | null = activeFile.parent;
+            while (currFolder) {
+                folders.push(currFolder);
+                currFolder = currFolder.parent;
+            }
+            folders.reverse();
+
+            const foldersWithoutRoot = folders.filter(f => f.path !== '/');
+            const isClickingFileCrumb = clickedIndex === crumbs.length - 1;
+
+            let targetFolder: TFolder | undefined;
+            if (isClickingFileCrumb) {
+                targetFolder = foldersWithoutRoot[foldersWithoutRoot.length - 1] ?? folders[0];
+            } else {
+                targetFolder = foldersWithoutRoot[clickedIndex] ?? folders[0];
+            }
+            if (!targetFolder) return;
+
+            if (openInNewTab) {
+                await this.navigateToGridInNewTab('folder', targetFolder.path, '');
+            } else {
+                await this.navigateToGrid('folder', targetFolder.path, '');
+            }
+        };
+
+        this.registerDomEvent(activeDocument, 'click', (evt: MouseEvent) => {
+            void handleBreadcrumbNavigation(evt, false);
+        }, true);
+
+        this.registerDomEvent(activeDocument, 'auxclick', (evt: MouseEvent) => {
+            if (evt.button !== 1) return;
+            void handleBreadcrumbNavigation(evt, true);
+        }, true);
+
+
+        // 註冊版面拖曳處理
+        this.setupCanvasDropHandlers();
+
+        // 暴露 API 供其他外掛使用
+        const appWithPlugins = this.app as {
+            plugins?: {
+                plugins?: Record<string, unknown>;
+            };
+        };
+        if (appWithPlugins.plugins?.plugins) {
+            appWithPlugins.plugins.plugins['gridexplorer'] = this;
+        }
+
+        // Override new tab behavior (for useQuickAccessAsNewTabMode setting)
+        const { workspace } = this.app;
+
+        workspace.onLayoutReady(() => {
+            // Create a WeakSet to store existing leaves to find new created leaves after plugin load.
+            const existingLeaves = new WeakSet<WorkspaceLeaf>();
+            workspace.iterateAllLeaves((leaf) => {
+                existingLeaves.add(leaf);
+            });
+
+            // Registers layout-change event listener when the workspace layout changes, including new tabs being created.
+            this.registerEvent(
+                workspace.on("layout-change", () => {
+                    this.checkForNewTab(existingLeaves);
+                }),
+            );
+
+            // console.log('GridExplorer: Starting cache warming process.');
+            // this.startWarmingCache();
+        });
+
+        // 註冊全域事件與掛載 window API 供其他外掛呼叫
+        this.registerEvent(
+            (this.app.workspace as unknown as CustomWorkspace).on('grid-explorer:preview-file', (fileOrPath: string | TFile) => {
+                void this.previewFile(fileOrPath);
+            })
+        );
+        window.GridExplorer = this;
+    }
+
+
+
+    // startWarmingCache() {
+    //     // 1. 取得所有 Markdown 檔案的列表
+    //     const filesToWarm = this.app.vault.getMarkdownFiles();
+    //     if (!filesToWarm || filesToWarm.length === 0) {
+    //         console.log('GridExplorer: No markdown files to warm.');
+    //         return;
+    //     }
+
+    //     // 建立一個檔案佇列 (Queue)
+    //     let fileQueue = [...filesToWarm];
+    //     console.log(`GridExplorer: Warming up cache for ${fileQueue.length} files.`);
+
+    //     // 2. 定義處理單個檔案的函式
+    //     // 我們會使用 app.vault.cachedRead 來讀取檔案內容，
+    //     // 這個動作會觸發 Obsidian 的快取機制。
+    //     const processFile = (file: TFile) => {
+    //         try {
+    //             // 核心操作：讀取檔案。我們不需要對回傳的 content 做任何事。
+    //             this.app.vault.cachedRead(file);
+    //             // console.log(`Warmed: ${file.path}`); // 可選：用於除錯
+    //         } catch (e) {
+    //             console.error(`GridExplorer: Failed to warm cache for ${file.path}:`, e);
+    //         }
+    //     };
+
+    //     // 3. 使用 requestIdleCallback 來排程任務
+    //     const scheduleNextBatch = (deadline: IdleDeadline) => {
+    //         // deadline.timeRemaining() 會告訴我們還有多少閒置時間 (毫秒)
+    //         // 只要還有閒置時間，並且佇列中還有檔案，我們就繼續處理。
+    //         while (deadline.timeRemaining() > 0 && fileQueue.length > 0) {
+    //             // 從佇列的前端取出一個檔案來處理
+    //             const file = fileQueue.shift();
+    //             if (file) {
+    //                 processFile(file);
+    //             }
+    //         }
+
+    //         // 如果佇列中還有檔案沒處理完，就排程下一次的 requestIdleCallback
+    //         if (fileQueue.length > 0) {
+    //             requestIdleCallback(scheduleNextBatch);
+    //         } else {
+    //             console.log('GridExplorer: Cache warming complete.');
+    //         }
+    //     };
+
+    //     // 4. 啟動第一個閒置回呼
+    //     requestIdleCallback(scheduleNextBatch);
+    // }
+
+    // 設定 Canvas 拖曳處理
+    private setupCanvasDropHandlers() {
+        const setup = () => {
+            this.app.workspace.getLeavesOfType('canvas').forEach(leaf => {
+                const canvasView = leaf.view as CanvasDropView;
+                if (canvasView.gridExplorerDropHandler) {
+                    return;
+                }
+                canvasView.gridExplorerDropHandler = true;
+
+                const canvasEl = canvasView.containerEl;
+                if (!canvasEl) return;
+                
+                const dragoverHandler = (evt: DragEvent) => {
+                    // 只處理來自 Grid Explorer 的檔案拖曳，以顯示正確的游標
+                    if (evt.dataTransfer?.types.includes('application/obsidian-grid-explorer-files')) {
+                        evt.preventDefault();
+                        evt.dataTransfer.dropEffect = 'copy';
+                    }
+                };
+
+                const dropHandler = async (evt: DragEvent) => {
+                    // 只處理來自 Grid Explorer 的拖曳事件
+                    if (!evt.dataTransfer?.types.includes('application/obsidian-grid-explorer-files')) {
+                        return; // 如果不是，則不做任何事，讓事件繼續傳遞給 Canvas 的預設處理器
+                    }
+
+                    // 來自 Grid Explorer 的拖曳，處理它並阻止預設行為
+                    evt.preventDefault();
+                    evt.stopPropagation();
+
+                    // 嘗試解析多檔路徑
+                    const data = evt.dataTransfer.getData('application/obsidian-grid-explorer-files');
+                    let filePaths: string[] = [];
+                    try {
+                        const parsed: unknown = JSON.parse(data);
+                        if (Array.isArray(parsed)) {
+                            filePaths = parsed.filter((p): p is string => typeof p === 'string');
+                        } else if (typeof parsed === 'string') {
+                            filePaths = [parsed];
+                        }
+                    } catch (e) {
+                        console.error("GridExplorer: Failed to parse drop data from GridExplorer.", e);
+                    }
+
+                    // 如果無法取得檔案路徑，則中止操作
+                    if (filePaths.length === 0) {
+                        return;
+                    }
+
+                    const canvas = canvasView.canvas;
+                    if (!canvas) {
+                        return;
+                    }
+
+                    const pos = canvas.posFromEvt(evt);
+                    let currentPos = { ...pos };
+
+                    // 逐一建立節點，若多檔則位置做些微偏移
+                    for (let i = 0; i < filePaths.length; i++) {
+                        const filePath = filePaths[i];
+                        const tfile = this.app.vault.getAbstractFileByPath(filePath);
+                        if (!(tfile instanceof TFile)) {
+                            console.warn('GridExplorer: Dropped item is not a TFile or could not be found.', filePath);
+                            continue;
+                        }
+
+                        const newNode = canvas.createFileNode({
+                            file: tfile,
+                            pos: currentPos,
+                            size: { width: 400, height: 400 }, // 預設大小
+                            focus: filePaths.length === 1 || i === filePaths.length - 1, // 單檔或最後一個檔案才自動對焦
+                        });
+                        canvas.addNode(newNode);
+
+                        // 如果有多個檔案，下一個節點位置向右下偏移
+                        if (filePaths.length > 1) {
+                            currentPos = { x: currentPos.x + 50, y: currentPos.y + 50 };
+                        }
+                    }
+
+                    await canvas.requestSave();
+                };
+
+                this.registerDomEvent(canvasEl, 'dragover', dragoverHandler);
+                this.registerDomEvent(canvasEl, 'drop', dropHandler, true); // 使用捕獲階段，以優先處理事件
+            });
+        };
+
+        this.registerEvent(this.app.workspace.on('layout-change', setup));
+        setup(); // 首次執行設定
+    }
+
+    // Navigate to a Grid Explorer source atomically. If Grid Explorer is not already
+    // active, the requested source becomes the first Grid state in the leaf history
+    // (avoiding an artificial Grid-root history entry between a note and its target).
+    async navigateToGrid(
+        mode: string = 'folder',
+        path: string = '/',
+        searchQuery?: string,
+        searchCurrentLocationOnly?: boolean,
+        searchFilesNameOnly?: boolean,
+        searchMediaFiles?: boolean,
+        bookmarkGroupId?: string,
+    ) {
+        const { workspace } = this.app;
+        const activeGrid = workspace.getActiveViewOfType(GridView);
+        if (activeGrid) {
+            await activeGrid.setSource(
+                mode,
+                path,
+                true,
+                searchQuery,
+                searchCurrentLocationOnly,
+                searchFilesNameOnly,
+                searchMediaFiles,
+                bookmarkGroupId,
+            );
+            return activeGrid;
+        }
+
+        const sourceMode = mode || 'folder';
+        let sourcePath = path || '/';
+        if (sourceMode !== 'folder' && sourceMode !== 'backlinks' && sourceMode !== 'outgoinglinks') {
+            sourcePath = '/';
+        }
+
+        const state: Record<string, unknown> = { sourceMode, sourcePath };
+        if (searchQuery !== undefined) state.searchQuery = searchQuery;
+        if (searchCurrentLocationOnly !== undefined) state.searchCurrentLocationOnly = searchCurrentLocationOnly;
+        if (searchFilesNameOnly !== undefined) state.searchFilesNameOnly = searchFilesNameOnly;
+        if (searchMediaFiles !== undefined) state.searchMediaFiles = searchMediaFiles;
+        if (bookmarkGroupId !== undefined) state.bookmarkGroupId = bookmarkGroupId;
+
+        const leaf = workspace.getLeaf(false);
+        await leaf.setViewState({ type: 'grid-view', active: true, state });
+        await workspace.revealLeaf(leaf);
+        return leaf.view;
+    }
+
+    async navigateToGridInNewTab(
+        mode: string = 'folder',
+        path: string = '/',
+        searchQuery?: string,
+        searchCurrentLocationOnly?: boolean,
+        searchFilesNameOnly?: boolean,
+        searchMediaFiles?: boolean,
+        bookmarkGroupId?: string,
+    ) {
+        const sourceMode = mode || 'folder';
+        let sourcePath = path || '/';
+        if (sourceMode !== 'folder' && sourceMode !== 'backlinks' && sourceMode !== 'outgoinglinks') {
+            sourcePath = '/';
+        }
+
+        const state: Record<string, unknown> = { sourceMode, sourcePath };
+        if (searchQuery !== undefined) state.searchQuery = searchQuery;
+        if (searchCurrentLocationOnly !== undefined) state.searchCurrentLocationOnly = searchCurrentLocationOnly;
+        if (searchFilesNameOnly !== undefined) state.searchFilesNameOnly = searchFilesNameOnly;
+        if (searchMediaFiles !== undefined) state.searchMediaFiles = searchMediaFiles;
+        if (bookmarkGroupId !== undefined) state.bookmarkGroupId = bookmarkGroupId;
+
+        const leaf = this.app.workspace.getLeaf('tab');
+        await leaf.setViewState({ type: 'grid-view', active: true, state });
+        await this.app.workspace.revealLeaf(leaf);
+        return leaf.view;
+    }
+
+    // 打開最近文件
+    async openNoteInRecentFiles(file: TFile) {
+        const view = await this.navigateToGrid('recent-files');
+        if (view instanceof GridView) {
+            view.targetFocusPath = file.path;
+            await view.render();
+        }
+    }
+
+    // 打開筆記到資料夾模式
+    async openNoteInFolder(file: TFile | TFolder = this.app.vault.getRoot()) {
+        const folderPath = file instanceof TFile ? (file.parent?.path || '/') : (file.path || '/');
+        const view = await this.navigateToGrid('folder', folderPath);
+        if (view instanceof GridView && file instanceof TFile) {
+            view.targetFocusPath = file.path;
+            await view.render();
+        }
+    }
+
+    // Activate Grid Explorer at its root without jumping to an existing Grid leaf.
+    async activateView() {
+        const activeGrid = this.app.workspace.getActiveViewOfType(GridView);
+        if (activeGrid) return activeGrid;
+        return this.navigateToGrid('folder', '/');
+    }
+
+    // Function to check for new tabs and convert them to grid-view (for useQuickAccessAsNewTabMode setting)
+    checkForNewTab(existingLeaves: WeakSet<WorkspaceLeaf>) {
+        // Only proceed if the new tab override setting is not set to default
+        if (this.settings.useQuickAccessAsNewTabMode === 'default') {
+            return;
+        }
+
+        // Only proceed if the default open location is set to 'tab'
+        if (this.settings.defaultOpenLocation !== 'tab') {
+            return;
+        }
+
+        this.app.workspace.iterateAllLeaves((leaf) => {
+            if (existingLeaves.has(leaf)) return;
+            existingLeaves.add(leaf);
+            if (!this.tabIsEmpty(leaf)) return;
+
+            const gridViewLeaves = this.app.workspace.getLeavesOfType('grid-view');
+            const openInFolder = this.settings.useQuickAccessAsNewTabMode === 'folder';
+            const mode = openInFolder ? 'folder' : this.settings.quickAccessModeType;
+            let path = '';
+
+            if (openInFolder) {
+                path = this.settings.quickAccessCommandPath || this.app.vault.getRoot().path;
+                const targetFile = this.app.vault.getAbstractFileByPath(path);
+                if (!(targetFile instanceof TFolder)) {
+                    path = this.app.vault.getRoot().path;
+                }
+            }
+
+            // Check if setting "reuseExistingLeaf" is enabled and if there are existing grid-view leaves
+            if (this.settings.reuseExistingLeaf && gridViewLeaves.length > 0) {
+                const leafToReuse = gridViewLeaves[0];
+                const isSidebarLeaf = leafToReuse.getRoot() !== this.app.workspace.rootSplit;
+
+                // If the only view is in the sidebar, ignore to prevent infinite loop
+                if (!isSidebarLeaf) {
+                    if (leafToReuse.view instanceof GridView) {
+                        void leafToReuse.view.setSource(mode, path);
+                    }
+
+                    void this.app.workspace.revealLeaf(leafToReuse);
+
+                    // Close the new empty tab
+                    leaf.detach();
+
+                    return;
+                }
+            }
+
+            // Convert the new empty tab directly to its requested Grid state.
+            void leaf.setViewState({
+                type: 'grid-view',
+                active: true,
+                state: { sourceMode: mode || 'folder', sourcePath: path || '/' },
+            });
+        });
+    }
+
+    // Checks if a given WorkspaceLeaf is currently empty (is New Tab).
+    tabIsEmpty(leaf: WorkspaceLeaf): boolean {
+        return leaf.getViewState()?.type === "empty";
+    }
+
+    async loadSettings() {
+        const loadedSettings = await this.loadData() as Partial<GallerySettings> | null;
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedSettings ?? {});
+
+        // Native-navigation fork: keep Grid Explorer in the main tab system and disable embedded-note preview.
+        this.settings.defaultOpenLocation = 'tab';
+        this.settings.reuseExistingLeaf = false;
+        this.settings.showNoteInGrid = false;
+        this.settings.closeGridViewOnOpenNote = false;
+        this.settings.openNoteLayout = 'default';
+        if (this.settings.badgeAction === 'open-in-grid') this.settings.badgeAction = 'none';
+        
+        // 相容舊版 boolean 設定
+        if (typeof this.settings.interceptAllTagClicks === 'boolean') {
+            this.settings.interceptAllTagClicks = this.settings.interceptAllTagClicks ? 'enabled' : 'disabled';
+        }
+        if (typeof this.settings.interceptBreadcrumbClicks === 'boolean') {
+            this.settings.interceptBreadcrumbClicks = this.settings.interceptBreadcrumbClicks ? 'enabled' : 'disabled';
+        }
+
+        migrateDataviewCodeToQuery(this.settings);
+        updateCustomDocumentExtensions(this.settings);
+    }
+
+    async saveSettings(update = true) {
+        await this.saveData(this.settings);
+        updateCustomDocumentExtensions(this.settings);
+
+        if (update) {
+            // 更新所有開啟的 GridView 實例
+            const gridLeaves = this.app.workspace.getLeavesOfType('grid-view');
+            gridLeaves.forEach(leaf => {
+                if (leaf.view instanceof GridView) {
+                    void leaf.view.render();
+                }
+            });
+
+            // 也刷新所有 ExplorerView（確保模式清單與設定開關同步）
+            const explorerLeaves = this.app.workspace.getLeavesOfType(EXPLORER_VIEW_TYPE);
+            explorerLeaves.forEach(leaf => {
+                if (leaf.view instanceof ExplorerView) {
+                    void (leaf.view).refresh();
+                }
+            });
+        }
+    }
+
+    async previewFile(fileOrPath: TFile | string) {
+        let file: TFile | null = null;
+        if (typeof fileOrPath === 'string') {
+            const abstractFile = this.app.vault.getAbstractFileByPath(fileOrPath);
+            if (abstractFile instanceof TFile) {
+                file = abstractFile;
+            }
+        } else if (fileOrPath instanceof TFile) {
+            file = fileOrPath;
+        }
+
+        if (!file) {
+            console.warn('Grid Explorer: Invalid file or path provided for preview.', fileOrPath);
+            return;
+        }
+
+        // Embedded note preview is disabled: preview requests now behave like a
+        // normal native file navigation, without inserting a temporary Grid state.
+        const activeView = this.app.workspace.getActiveViewOfType(GridView);
+        const leaf = activeView?.leaf ?? this.app.workspace.getLeaf(false);
+        await leaf.openFile(file);
+    }
+
+    onunload() {
+        if (window.GridExplorer === this) {
+            delete window.GridExplorer;
+        }
+        super.onunload();
+    }
+
+}
+
+
+function migrateDataviewCodeToQuery(settings: GallerySettings): void {
+    if (!settings.customModes) return;
+    for (const mode of settings.customModes) {
+        if ('dataviewCode' in mode && !('dataviewQuery' in mode)) {
+            const oldCode = (mode as unknown as { dataviewCode: string }).dataviewCode;
+            (mode as Record<string, unknown>).dataviewQuery = oldCode;
+            // 刪除舊欄位
+            delete (mode as unknown as Record<string, unknown>).dataviewCode;
+        }
+        if (mode.options) {
+            for (const opt of mode.options) {
+                if ('dataviewCode' in opt && !('dataviewQuery' in opt)) {
+                    const oldCode = (opt as unknown as { dataviewCode: string }).dataviewCode;
+                    (opt as Record<string, unknown>).dataviewQuery = oldCode;
+                    delete (opt as unknown as Record<string, unknown>).dataviewCode;
+                }
+            }
+        }
+    }
+}
