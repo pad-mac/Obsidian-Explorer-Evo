@@ -82,3 +82,10 @@ A normal `npm run build` should still be run in a complete local dependency envi
 - Embedded Bases are suppressed before Markdown rendering for both `![[File.base]]` transclusions and inline fenced `base` blocks.
 - Root bookmark-group collapse state is stored directly in plugin data rather than workspace view state.
 - Native pane actions are explicitly anchored to the right edge while the breadcrumb uses the remaining width and remains horizontally scrollable when necessary.
+
+## v12 (3.6.0) – Pop-out windows, mobile header, compact folders
+- Native note-breadcrumb and tag-click interception now work in pop-out windows: the document-level capture listeners are attached to every window (`window-open` + windows restored with the layout), not only the main document. The breadcrumb resolves the leaf that owns it and opens the Grid in that window.
+- Grid breadcrumb middle-click uses Obsidian's cross-window `instanceOf` check, so it also works in pop-outs.
+- Mobile: the view header wraps; row 1 holds the action buttons and the native pane actions (three-dot menu stays visible), row 2 holds the breadcrumb, horizontally scrollable.
+- Breadcrumb context menu (right-click / long-press): parent crumbs and the plain root title offer Open / Open in new tab; the current-folder menu gains Open in new tab at the top.
+- Compact folder style: new **Compact folder width** setting (default 160px). Buttons sit in uniform auto-fill columns, so a lone button on the last row no longer stretches across the whole row. 0 restores the original flex-wrap behaviour.

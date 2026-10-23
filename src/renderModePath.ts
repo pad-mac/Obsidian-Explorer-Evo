@@ -245,9 +245,39 @@ export function renderModePath(gridView: GridView) {
             const el = pathElements[i];
             pathContainer.appendChild(el);
 
+            // Right-click / long-press on parent crumbs (and the plain root title) offers
+            // Open / Open in new tab, so new-tab navigation is reachable on mobile too.
+            // The current-folder crumb has its own richer menu (see below).
+            if (!el.hasClass('ge-current-folder')) {
+                el.addEventListener('contextmenu', (event: MouseEvent) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const crumbPath = paths[i].path;
+                    const menu = new Menu();
+                    if (crumbPath !== gridView.sourcePath) {
+                        menu.addItem((item) => {
+                            item.setTitle(t('open'))
+                                .setIcon('folder-open')
+                                .onClick(() => {
+                                    void gridView.setSource('folder', crumbPath);
+                                    gridView.clearSelection();
+                                });
+                        });
+                    }
+                    menu.addItem((item) => {
+                        item.setTitle(t('open_in_new_tab'))
+                            .setIcon('file-plus')
+                            .onClick(() => {
+                                void openFolderInNewGridTab(gridView, crumbPath);
+                            });
+                    });
+                    menu.showAtMouseEvent(event);
+                });
+            }
+
             // Ctrl/Cmd-click and middle-click open any breadcrumb folder in a new Grid tab.
             // A touchpad three-finger tap works here when the OS maps it to middle-click.
-            if (el instanceof HTMLAnchorElement) {
+            if (el.instanceOf(HTMLAnchorElement)) {
                 el.addEventListener('auxclick', (event: MouseEvent) => {
                     if (event.button !== 1) return;
                     event.preventDefault();
@@ -454,6 +484,15 @@ export function renderModePath(gridView: GridView) {
 
                     const menu = new Menu();
 
+                    // Open the current folder in a new Grid Explorer tab (reachable via long-press on mobile).
+                    menu.addItem((item) => {
+                        item.setTitle(t('open_in_new_tab'))
+                            .setIcon('file-plus')
+                            .onClick(() => {
+                                void openFolderInNewGridTab(gridView, gridView.sourcePath);
+                            });
+                    });
+
                     // 為當前資料夾加入子資料夾清單
                     // 'show': 只有根目錄加入子資料夾清單
                     // 'menu': 當前資料夾（含根目錄）都加入子資料夾清單
@@ -657,7 +696,7 @@ export function renderModePath(gridView: GridView) {
                     // menu -> 顯示選單
                     // hide -> 不顯示選單
                     if (gridView.sourcePath === '/') {
-                        if (gridView.plugin.settings.folderDisplayStyle === 'menu') {
+                        if (gridView.plugin.settings.folderDisplayStyle === 'menu' || event.type === 'contextmenu') {
                             menu.showAtMouseEvent(event);
                         }
                     } else {
@@ -668,6 +707,14 @@ export function renderModePath(gridView: GridView) {
                 el.addEventListener('click', showCurrentFolderMenu);
                 el.addEventListener('contextmenu', showCurrentFolderMenu);
             }
+        }
+
+        if (Platform.isMobile) {
+            const stopIfScrollable = (evt: TouchEvent) => {
+                if (pathContainer.scrollWidth > pathContainer.clientWidth) evt.stopPropagation();
+            };
+            pathContainer.addEventListener('touchstart', stopIfScrollable, { passive: true });
+            pathContainer.addEventListener('touchmove', stopIfScrollable, { passive: true });
         }
 
         // 添加滾動事件支援水平捲動

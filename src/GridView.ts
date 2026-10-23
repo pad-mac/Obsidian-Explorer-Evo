@@ -947,7 +947,9 @@ export class GridView extends ItemView {
             '--image-area-width': `${imageAreaWidth}px`,
             '--image-area-height': `${imageAreaHeight}px`,
             '--title-font-size': `${settings.titleFontSize}em`,
+            '--ge-compact-folder-width': `${settings.compactFolderWidth || 160}px`,
         });
+        container.toggleClass('ge-compact-folders-uniform', (settings.compactFolderWidth ?? 0) > 0);
 
         // 依圖片位置設定切換樣式類別
         if (this.cardLayout === 'vertical') {

@@ -56,6 +56,7 @@ export interface GallerySettings {
     summaryLength: number; // 筆記摘要的字數
     enableFileWatcher: boolean; // 是否啟用檔案監控
     folderDisplayStyle: 'show' | 'compact' | 'menu' | 'hide'; // 資料夾顯示樣式：直接顯示、緊湊、以選單顯示、不顯示
+    compactFolderWidth: number; // Compact folder buttons: uniform column width in px (0 = original flexible wrap)
     showMediaFiles: boolean; // 是否顯示圖片和影片
     showVideoThumbnails: boolean; // 是否顯示影片縮圖
     defaultOpenLocation: string; // 預設開啟位置
@@ -120,6 +121,7 @@ export const DEFAULT_SETTINGS: GallerySettings = {
     summaryLength: 100, // 筆記摘要的字數，預設 100
     enableFileWatcher: true, // 預設啟用檔案監控
     folderDisplayStyle: 'show', // 預設直接顯示資料夾
+    compactFolderWidth: 160, // Compact folder buttons share a uniform column width
     showMediaFiles: true, // 預設顯示圖片和影片
     showVideoThumbnails: true, // 預設顯示影片縮圖
     defaultOpenLocation: 'tab', // Native-navigation fork: Grid Explorer is a main-area tab view.
@@ -722,8 +724,29 @@ export class GridExplorerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.folderDisplayStyle = value as 'show' | 'compact' | 'menu' | 'hide';
                         await this.plugin.saveSettings();
+                        this.display();
                     });
             });
+
+        // Compact folder width (only relevant for the compact folder style)
+        if (this.plugin.settings.folderDisplayStyle === 'compact') {
+            const compactWidthDesc = (value: number) =>
+                `${t('compact_folder_width_desc')} (now: ${value === 0 ? t('compact_folder_width_flexible') : `${value}px`})`;
+            const compactFolderWidthSetting = new Setting(sectionEl)
+                .setName(t('compact_folder_width'))
+                .setDesc(compactWidthDesc(this.plugin.settings.compactFolderWidth))
+                .addSlider(slider => {
+                    slider
+                        .setLimits(0, 400, 10)
+                        .setValue(this.plugin.settings.compactFolderWidth)
+                        .setDynamicTooltip()
+                        .onChange(async (value) => {
+                            compactFolderWidthSetting.setDesc(compactWidthDesc(value));
+                            this.plugin.settings.compactFolderWidth = value;
+                            await this.plugin.saveSettings();
+                        });
+                });
+        }
 
         // 顯示圖片和影片設定
         new Setting(sectionEl)

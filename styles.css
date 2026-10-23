@@ -4127,3 +4127,73 @@ a.ge-current-folder:hover {
     height: 1px;
     pointer-events: none;
 }
+
+
+/* Compact folders: uniform columns ---------------------------------------------------
+   Instead of flex-wrap (where a lone overflow button stretches across the whole last
+   row), compact folder buttons share one column width. Buttons stretch evenly to fill
+   each row; the last row keeps the same width. Width 0 in settings = legacy flex wrap. */
+.ge-compact-folders-uniform .ge-folders-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(var(--ge-compact-folder-width, 160px), 100%), 1fr));
+}
+
+.ge-compact-folders-uniform .ge-folder-button {
+    min-width: 0;
+    max-width: none;
+}
+
+.ge-compact-folders-uniform .ge-folder-button .ge-title-container {
+    min-width: 0;
+}
+
+.ge-compact-folders-uniform .ge-folder-button .ge-title {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+
+/* Mobile header: breadcrumb on its own scrollable second row -------------------------
+   On mobile the one-row header pushed Obsidian's pane-menu button out of view. Row 1
+   keeps the action buttons + native view actions; the hierarchy wraps onto row 2 and
+   scrolls horizontally there. */
+.is-mobile .ge-grid-view-container > .view-header {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: var(--header-height);
+    row-gap: 0;
+}
+
+.is-mobile .ge-grid-view-container > .view-header .ge-header-buttons.ge-native-header-buttons {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.is-mobile .ge-grid-view-container > .view-header .ge-header-buttons.ge-native-header-buttons::-webkit-scrollbar {
+    display: none;
+}
+
+.is-mobile .ge-grid-view-container > .view-header .view-actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.is-mobile .ge-grid-view-container > .view-header .ge-native-breadcrumb-host {
+    order: 100;
+    flex: 1 0 100%;
+    width: 100%;
+    max-width: 100%;
+    margin: 0;
+    padding: 0 4px 6px;
+}
+
+.is-mobile .ge-grid-view-container > .view-header .ge-native-mode-header-container .ge-path-container {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+    overscroll-behavior-x: contain;
+}

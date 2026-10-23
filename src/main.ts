@@ -1,4 +1,4 @@
-import { EventRef, Menu, MenuItem, Plugin, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
+import { EventRef, FileView, Menu, MenuItem, Plugin, TFile, TFolder, WorkspaceLeaf } from 'obsidian';
 import { GridView } from './GridView';
 import { ExplorerView, EXPLORER_VIEW_TYPE } from './ExplorerView';
 import { ZipView, VIEW_TYPE_ZIP } from './ZipView';
@@ -368,7 +368,7 @@ export default class GridExplorerPlugin extends Plugin {
         );
 
         // 攔截所有tag點擊事件
-        this.registerDomEvent(activeDocument, 'click', async (evt: MouseEvent) => {
+        const handleTagClick = async (evt: MouseEvent) => {
             // 判斷是否符合攔截條件
             const tagMode = this.settings.interceptAllTagClicks;
             if (tagMode === 'disabled') return;
@@ -430,7 +430,7 @@ export default class GridExplorerPlugin extends Plugin {
 
             // 叫出 GridView，並把搜尋字串設成這個 tag
             await this.navigateToGrid('', '', `#${tagName}`);
-        }, true); // 用 capture，可在其他 listener 前先吃到
+        }; // registered per window (capture) below
 
         
         // Intercept Obsidian's native note breadcrumb. Normal click opens the
@@ -459,7 +459,20 @@ export default class GridExplorerPlugin extends Plugin {
             const clickedIndex = crumbs.indexOf(breadcrumbEl);
             if (clickedIndex < 0) return;
 
-            const activeFile = this.app.workspace.getActiveFile();
+            // Resolve the leaf that owns this breadcrumb (it may live in a pop-out window)
+            // and make it active, so the Grid opens in that window rather than the main one.
+            const leafContentEl = breadcrumbEl.closest('.workspace-leaf-content');
+            const ownerLeaves: WorkspaceLeaf[] = [];
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                if (leafContentEl && leaf.view?.containerEl === leafContentEl) ownerLeaves.push(leaf);
+            });
+            const sourceLeaf: WorkspaceLeaf | null = ownerLeaves[0] ?? null;
+            const leafFile = sourceLeaf?.view instanceof FileView ? sourceLeaf.view.file : null;
+            if (sourceLeaf && this.app.workspace.getLeaf(false) !== sourceLeaf) {
+                this.app.workspace.setActiveLeaf(sourceLeaf, { focus: true });
+            }
+
+            const activeFile = leafFile ?? this.app.workspace.getActiveFile();
             if (!activeFile) return;
 
             const folders: TFolder[] = [];
@@ -488,14 +501,38 @@ export default class GridExplorerPlugin extends Plugin {
             }
         };
 
-        this.registerDomEvent(activeDocument, 'click', (evt: MouseEvent) => {
-            void handleBreadcrumbNavigation(evt, false);
-        }, true);
+        // Document-level click interception must be attached to every window:
+        // pop-out windows have their own `document`, so listeners on the main
+        // document never see clicks there.
+        const listenedDocuments = new WeakSet<Document>();
+        const registerDocumentListeners = (doc: Document | null | undefined) => {
+            if (!doc || listenedDocuments.has(doc)) return;
+            listenedDocuments.add(doc);
 
-        this.registerDomEvent(activeDocument, 'auxclick', (evt: MouseEvent) => {
-            if (evt.button !== 1) return;
-            void handleBreadcrumbNavigation(evt, true);
-        }, true);
+            this.registerDomEvent(doc, 'click', (evt: MouseEvent) => {
+                void handleTagClick(evt);
+            }, true); // 用 capture，可在其他 listener 前先吃到
+
+            this.registerDomEvent(doc, 'click', (evt: MouseEvent) => {
+                void handleBreadcrumbNavigation(evt, false);
+            }, true);
+
+            this.registerDomEvent(doc, 'auxclick', (evt: MouseEvent) => {
+                if (evt.button !== 1) return;
+                void handleBreadcrumbNavigation(evt, true);
+            }, true);
+        };
+
+        registerDocumentListeners(document);
+        this.registerEvent(this.app.workspace.on('window-open', (_workspaceWindow, win) => {
+            registerDocumentListeners(win.document);
+        }));
+        this.app.workspace.onLayoutReady(() => {
+            // Pop-out windows restored with the workspace may already exist.
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                registerDocumentListeners(leaf.view?.containerEl?.ownerDocument);
+            });
+        });
 
 
         // 註冊版面拖曳處理

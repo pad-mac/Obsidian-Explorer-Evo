@@ -1,4 +1,8 @@
 export default {
+    'compact_folder_width': 'Compact folder width',
+    'compact_folder_width_desc': 'Uniform column width for compact folder buttons; buttons stretch evenly to fill each row and the last row keeps the same width. 0 = original flexible wrapping',
+    'compact_folder_width_flexible': 'flexible',
+    'open': 'Open',
     'open_note': 'Open note',
     'loading': 'Loading…',
     'full_view': 'Full view',
