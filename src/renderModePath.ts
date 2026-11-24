@@ -8,6 +8,7 @@ import { showFolderMoveModal } from './modal/folderMoveModal';
 import { CustomModeModal } from './modal/customModeModal';
 import { showSearchModal } from './modal/searchModal';
 import { t } from './translations';
+import { addBookmarkFolderMenuItem } from './utils/bookmarkFolder';
 interface SearchLeaf {
     view?: {
         searchComponent?: {
@@ -271,6 +272,7 @@ export function renderModePath(gridView: GridView) {
                                 void openFolderInNewGridTab(gridView, crumbPath);
                             });
                     });
+                    addBookmarkFolderMenuItem(menu, gridView.app, crumbPath);
                     menu.showAtMouseEvent(event);
                 });
             }
@@ -492,6 +494,7 @@ export function renderModePath(gridView: GridView) {
                                 void openFolderInNewGridTab(gridView, gridView.sourcePath);
                             });
                     });
+                    addBookmarkFolderMenuItem(menu, gridView.app, gridView.sourcePath);
 
                     // 為當前資料夾加入子資料夾清單
                     // 'show': 只有根目錄加入子資料夾清單

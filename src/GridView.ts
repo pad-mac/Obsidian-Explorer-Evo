@@ -20,15 +20,11 @@ import { FloatingAudioPlayer } from './FloatingAudioPlayer';
 import { ExplorerView, EXPLORER_VIEW_TYPE } from './ExplorerView';
 import { GridPreviewManager } from './GridPreviewManager';
 import { t } from './translations';
-import { createShortcut } from './utils/createItemUtils';
+import { bookmarkFolder } from './utils/bookmarkFolder';
 import {
     NativeBookmarkItem,
-    addFileToNativeBookmarks,
-    findBookmarkedFolderShortcut,
-    findRootFolderShortcut,
     getNativeBookmarksInstance,
     getNativeBookmarkItems,
-    isFileInNativeBookmarks,
     resolveBookmarkedFile,
 } from './utils/bookmarkUtils';
 
@@ -1661,37 +1657,7 @@ export class GridView extends ItemView {
     }
 
     private async bookmarkCurrentFolder(): Promise<void> {
-        if (!getNativeBookmarksInstance(this.app)) {
-            new Notice(t('bookmarks_plugin_disabled'));
-            return;
-        }
-
-        const folder = this.app.vault.getAbstractFileByPath(this.sourcePath);
-        if (!(folder instanceof TFolder) || folder.path === '/') return;
-
-        const alreadyBookmarked = findBookmarkedFolderShortcut(this.app, folder.path);
-        if (alreadyBookmarked) {
-            new Notice(t('folder_already_bookmarked'));
-            return;
-        }
-
-        let shortcut = findRootFolderShortcut(this.app, folder.path);
-        if (!shortcut) {
-            shortcut = await createShortcut(this.app, '/', {
-                type: 'folder',
-                value: folder.path,
-                display: folder.name,
-            }, false);
-        }
-        if (!shortcut) return;
-
-        if (addFileToNativeBookmarks(this.app, shortcut)) {
-            new Notice(t('folder_bookmarked'));
-        } else if (isFileInNativeBookmarks(this.app, shortcut.path)) {
-            new Notice(t('folder_already_bookmarked'));
-        } else {
-            console.error(`GridExplorer: failed to bookmark folder shortcut ${shortcut.path}`);
-        }
+        await bookmarkFolder(this.app, this.sourcePath);
     }
 
     /** Shared lazy preview/image loader for normal files and root bookmark sections. */

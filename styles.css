@@ -55,9 +55,9 @@
 @media (hover: hover) {
     body .ge-grid-view-container .ge-grid-container .ge-grid-item:hover {
         transform: translateY(-2px);
-        background-color: var(--text-selection);
+        background-color: var(--ge-hover-card-bg);
         box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-        border-color: var(--interactive-accent);
+        border-color: var(--ge-hover-border);
     }
 
     .ge-grid-item:hover p {
@@ -3506,10 +3506,10 @@ a.ge-current-folder:hover {
 
 @media (hover: hover) {
     body .ge-folder-button:hover {
-        background-color: var(--text-selection);
+        background-color: var(--ge-hover-folder-bg);
         transform: translateY(-1px);
         box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-        border-color: var(--interactive-accent);
+        border-color: var(--ge-hover-border);
     }
 }
 
@@ -4008,8 +4008,8 @@ a.ge-current-folder:hover {
 }
 
 .ge-root-bookmark-action:hover {
-    background: var(--text-selection);
-    border-color: var(--interactive-accent);
+    background: var(--ge-hover-card-bg);
+    border-color: var(--ge-hover-border);
 }
 
 .ge-root-bookmark-action-icon {
@@ -4196,4 +4196,22 @@ a.ge-current-folder:hover {
     -webkit-overflow-scrolling: touch;
     touch-action: pan-x;
     overscroll-behavior-x: contain;
+}
+
+
+/* Hover highlight -----------------------------------------------------------------------
+   Previously cards/folder buttons took --text-selection (the theme's text-selection
+   colour) on hover. Now the tint is derived from Obsidian's accent colour setting
+   (Settings → Appearance → Accent color), mixed into each element's own background so it
+   sits inside the theme in light and dark mode. Override these variables in a snippet to tune. */
+body {
+    --ge-accent: var(--color-accent, var(--interactive-accent));
+    --ge-hover-tint: 9%;
+    --ge-hover-card-bg: color-mix(in srgb, var(--ge-accent) var(--ge-hover-tint), var(--background-primary));
+    --ge-hover-folder-bg: color-mix(in srgb, var(--ge-accent) var(--ge-hover-tint), var(--background-primary-alt));
+    --ge-hover-border: color-mix(in srgb, var(--ge-accent) 45%, var(--background-modifier-border));
+}
+
+body.theme-dark {
+    --ge-hover-tint: 13%;
 }

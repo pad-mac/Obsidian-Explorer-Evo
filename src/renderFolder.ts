@@ -9,6 +9,7 @@ import { showFolderMoveModal } from './modal/folderMoveModal';
 import { showFolderRenameModal } from './modal/folderRenameModal';
 import { ShortcutSelectionModal } from './modal/shortcutSelectionModal';
 import { t } from './translations';
+import { addBookmarkFolderMenuItem } from './utils/bookmarkFolder';
 
 interface AppWithShowInFolder {
     showInFolder?: (path: string) => void;
@@ -273,6 +274,7 @@ export async function renderFolder(gridView: GridView, container: HTMLElement) {
                                     openFolderInNewView(gridView, folder.path);
                                 });
                         });
+                        addBookmarkFolderMenuItem(menu, gridView.app, folder.path);
                         // 在系統檔案總管開啟
                         if (Platform.isDesktop) {
                             menu.addItem((item) => {

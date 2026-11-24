@@ -12,6 +12,7 @@ import { MediaModal } from './modal/mediaModal';
 import { ShortcutSelectionModal } from './modal/shortcutSelectionModal';
 import { FloatingAudioPlayer } from './FloatingAudioPlayer';
 import { t } from './translations';
+import { addBookmarkFolderMenuItem } from './utils/bookmarkFolder';
 import { CustomMode, GallerySettings } from './settings';
 
 // 探索器視圖類型常數
@@ -1865,6 +1866,7 @@ export class ExplorerView extends ItemView {
                 .setIcon('grid')
                 .onClick(() => this.openFolderInNewView(folder.path));
         });
+        addBookmarkFolderMenuItem(menu, this.app, folder.path);
         menu.addSeparator();
 
         // 添加新增筆記相關選項
